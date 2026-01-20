@@ -10,14 +10,14 @@ process FASTQC {
     container "quay.io/biocontainers/fastqc:0.12.1--hdfd78af_0"
 
     input:
-        tuple val(sample_id), path(reads)
+        tuple val(sample_id), path(r1), path(r2)
 
     output:
-        buple val(sample_id), path("*_fastqc.zip"), path("*_fastqc.html")
+        tuple val(sample_id), path("*_fastqc.zip"), path("*_fastqc.html")
 
     script:
     """
-    fastqc -t ${task.cpus} ${reads}
+    fastqc -t ${task.cpus} ${r1} ${r2}
     """
 }
 
@@ -27,7 +27,7 @@ process MULTIQC {
     container "quay.io/biocontainers/multiqc:1.21--pyhdfd78af_0"
 
     input:
-        path(fastqpc_reports)
+        path(fastqc_dir)
 
     output:
         path("multiqc_report.html")
@@ -35,35 +35,30 @@ process MULTIQC {
 
     script:
     """
-    multiqc .
+    multiqc ${fastqc_dir} -o .
     """
 }
 
 workflow {
     // 1) Collect input reads
-    Channel
-        .fromPath(params.input, checkIfExists: true)
-        .map { file ->
-            // Extract sample_id from filename like SAMPLE_R1.fastq.gz or SAMPLE_R2.fastq.gz
-            def name - file.getBaseName() // e.g. "SAMPLE_R1.fastq"
-            def sample_id = name.replaceAll(/_R[12].*/, "")
-            tuple(sample_id, file)
-        }
-        .groupTuple()
-        .map { sample_id, files ->
-            // files should be [R1, R2] (order not guaranteed)
-            tuple(sample_id, files.sort { it.name })
-        }
-        .set { read_pairs_ch }
+    read_pairs_ch = 
+        channel
+            .fromPath(params.input, checkIfExists: true)
+            .map { file ->
+                // Extract sample_id from filename like SAMPLE_R1.fastq.gz or SAMPLE_R2.fastq.gz
+                def name = file.getBaseName() // e.g. "SAMPLE_R1.fastq"
+                def sample_id = name.replaceAll(/_R[12].*/, "")
+                tuple(sample_id, file)
+            }
+            .groupBy { t -> t[0] }
+            .map { sample_id, items ->
+                // files should be [R1, R2] (order not guaranteed)
+                def files = items.collect { t -> t[1] }.sort { f -> f.name }
+                tuple(sample_id, files)
+            }
 
     // 2) FastQC on both reads for each sample
-    fastqc_out = FASTQC(read_paris_ch)
+    FASTQC(read_pairs_ch)
 
-    // 3) MultiQC over all FastQC outputs
-    // FASTQC outputs tuples; MultiQC wants a folder of files.
-    fastqc_files = fastqc_out
-        .flatMap { sample_id, zip, html -> [zip, html] }
-        .collect()
-
-    MULTIQC(fastqc_files)
+    MULTIQC(file("${params.outdir}/fastqc"))
 }
